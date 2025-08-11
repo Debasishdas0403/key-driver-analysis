@@ -14,6 +14,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 import statsmodels.api as sm
 from statsmodels.stats.outliers_influence import variance_inflation_factor
+from statsmodels.discrete.discrete_model import Logit
 
 # ──────────────────────────────────────────────────────────────
 
@@ -52,6 +53,10 @@ def show_page() -> None:
     st.subheader("🚀 Model Training & Evaluation")
     if st.button("Train Logistic Regression Model", type="primary"):
         train_and_evaluate_model()
+
+    # 7 ▸ NEW: Factor significance analysis for Step 13 selection
+    if 'factor_significance_df' in st.session_state and st.session_state.factor_significance_df is not None:
+        display_factor_significance_for_step13()
 
 
 # ──────────────────────────────────────────────────────────────
@@ -379,14 +384,19 @@ def train_and_evaluate_model() -> None:
             X, y, test_size=0.3, random_state=42, stratify=stratify_param
         )
         
-        # Train model
+        # Train model with sklearn for performance metrics
         with st.spinner("Training logistic regression model..."):
-            model = LogisticRegression(max_iter=1000, random_state=42)
-            model.fit(X_train, y_train)
+            sklearn_model = LogisticRegression(max_iter=1000, random_state=42)
+            sklearn_model.fit(X_train, y_train)
         
-        # Predictions
-        y_pred = model.predict(X_test)
-        y_prob = model.predict_proba(X_test)[:, 1]
+        # Train model with statsmodels for p-values
+        with st.spinner("Calculating statistical significance..."):
+            X_train_const = sm.add_constant(X_train)
+            statsmodels_model = Logit(y_train, X_train_const).fit(disp=0)
+        
+        # Predictions using sklearn model
+        y_pred = sklearn_model.predict(X_test)
+        y_prob = sklearn_model.predict_proba(X_test)[:, 1]
         
         # Metrics
         acc = accuracy_score(y_test, y_pred)
@@ -407,8 +417,8 @@ def train_and_evaluate_model() -> None:
         # Feature importance
         coef_df = pd.DataFrame({
             "Variable": X.columns,
-            "Coefficient": model.coef_[0],
-            "Abs_Coefficient": np.abs(model.coef_[0]),
+            "Coefficient": sklearn_model.coef_[0],
+            "Abs_Coefficient": np.abs(sklearn_model.coef_[0]),
             "Type": ["Factored" if v in st.session_state.factor_names else "Raw" 
                     for v in X.columns]
         }).sort_values("Abs_Coefficient", ascending=False)
@@ -462,14 +472,14 @@ def train_and_evaluate_model() -> None:
         report = classification_report(y_test, y_pred, output_dict=True)
         report_df = pd.DataFrame(report).transpose()
         st.dataframe(report_df.round(3), use_container_width=True)
-
+        
         # ──────────────────────────────────────────────────────────────
-        # ADD THIS SECTION HERE - Store results for Step 13
+        # Store results for Step 13
         # ──────────────────────────────────────────────────────────────
-        st.session_state.regression_model = model
-        st.session_state.last_trained_model = model
+        st.session_state.regression_model = sklearn_model
+        st.session_state.last_trained_model = sklearn_model
         st.session_state.model_results = {
-            'regression_model': model,
+            'regression_model': sklearn_model,
             'selected_features': list(X.columns),
             'X_train': X_train,
             'X_test': X_test,
@@ -479,12 +489,150 @@ def train_and_evaluate_model() -> None:
             'y_pred_proba': y_prob
         }
         
+        # ──────────────────────────────────────────────────────────────
+        # NEW: Store factor significance data for Step 13 selection
+        # ──────────────────────────────────────────────────────────────
+        
+        # Create factor significance dataframe from statsmodels results
+        factor_significance_data = []
+        factored_features = [v for v in X.columns if v in st.session_state.factor_names]
+        
+        for i, feature in enumerate(['const'] + list(X.columns)):
+            if feature != 'const' and feature in factored_features:
+                factor_significance_data.append({
+                    'Factor': feature,
+                    'Beta': statsmodels_model.params[feature],
+                    'p_value': statsmodels_model.pvalues[feature],
+                    'Significance': get_significance_level(statsmodels_model.pvalues[feature])
+                })
+        
+        if factor_significance_data:
+            factor_significance_df = pd.DataFrame(factor_significance_data)
+            factor_significance_df = factor_significance_df.sort_values('p_value')
+            st.session_state.factor_significance_df = factor_significance_df
+        else:
+            st.session_state.factor_significance_df = None
+        
         # Show success message for Step 13 readiness
-        st.success("✅ Model results saved for Step 13 - Final Key Driver Summary")    
+        st.success("✅ Model results saved for Step 13 - Final Key Driver Summary")
         
     except Exception as e:
         st.error(f"❌ Error during model training: {str(e)}")
         st.info("This might be due to data quality issues. Please check your data.")
+
+
+# ───────────────────────── NEW: Factor significance for Step 13 ─────────────────────────
+def get_significance_level(p_value):
+    """Return significance level based on p-value."""
+    if p_value <= 0.001:
+        return "***"
+    elif p_value <= 0.01:
+        return "**"
+    elif p_value <= 0.05:
+        return "*"
+    elif p_value <= 0.10:
+        return "."
+    else:
+        return ""
+
+
+def display_factor_significance_for_step13() -> None:
+    """Display factored features with Beta and p-values for Step 13 selection."""
+    st.divider()
+    st.subheader("📈 Factor Significance Analysis for Step 13")
+    st.write("**Select which factored features to include in the final summary based on their statistical significance:**")
+    
+    factor_sig_df = st.session_state.factor_significance_df
+    
+    if factor_sig_df is None or factor_sig_df.empty:
+        st.info("ℹ️ No factored features available for significance analysis.")
+        return
+    
+    # Display the significance table with enhanced formatting
+    col1, col2 = st.columns([3, 1])
+    
+    with col1:
+        # Create a styled dataframe for display
+        display_df = factor_sig_df.copy()
+        display_df['Beta'] = display_df['Beta'].round(4)
+        display_df['p_value'] = display_df['p_value'].round(4)
+        
+        st.dataframe(
+            display_df,
+            use_container_width=True,
+            column_config={
+                "Factor": st.column_config.TextColumn("Factored Feature", width="medium"),
+                "Beta": st.column_config.NumberColumn("Beta Coefficient", format="%.4f"),
+                "p_value": st.column_config.NumberColumn("P-Value", format="%.4f"),
+                "Significance": st.column_config.TextColumn("Sig.", width="small")
+            }
+        )
+    
+    with col2:
+        st.write("**Significance Codes:**")
+        st.write("*** p ≤ 0.001")
+        st.write("**  p ≤ 0.01")
+        st.write("*   p ≤ 0.05")
+        st.write(".   p ≤ 0.10")
+        st.write("    p > 0.10")
+    
+    # Feature selection for Step 13
+    st.write("**📋 Select Factors for Step 13 Summary:**")
+    
+    # Initialize selection if not exists
+    if 'selected_factors_for_step13' not in st.session_state:
+        # Default: select significant factors (p ≤ 0.05)
+        st.session_state.selected_factors_for_step13 = factor_sig_df[factor_sig_df['p_value'] <= 0.05]['Factor'].tolist()
+    
+    # Quick selection buttons
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        if st.button("Select Significant (p ≤ 0.05)", key="select_significant"):
+            st.session_state.selected_factors_for_step13 = factor_sig_df[factor_sig_df['p_value'] <= 0.05]['Factor'].tolist()
+            st.rerun()
+    with col2:
+        if st.button("Select All Factors", key="select_all_factors"):
+            st.session_state.selected_factors_for_step13 = factor_sig_df['Factor'].tolist()
+            st.rerun()
+    with col3:
+        if st.button("Clear Selection", key="clear_factors"):
+            st.session_state.selected_factors_for_step13 = []
+            st.rerun()
+    
+    # Individual factor selection
+    selected_factors = []
+    for _, row in factor_sig_df.iterrows():
+        factor_name = row['Factor']
+        beta = row['Beta']
+        p_val = row['p_value']
+        sig = row['Significance']
+        
+        # Create a descriptive label
+        label = f"{factor_name} (β={beta:.3f}, p={p_val:.4f}{sig})"
+        
+        checked = st.checkbox(
+            label,
+            value=factor_name in st.session_state.selected_factors_for_step13,
+            key=f"step13_factor_{factor_name}"
+        )
+        
+        if checked:
+            selected_factors.append(factor_name)
+    
+    st.session_state.selected_factors_for_step13 = selected_factors
+    
+    # Summary
+    if selected_factors:
+        st.success(f"✅ {len(selected_factors)} factors selected for Step 13 summary")
+        with st.expander("View selected factors"):
+            for factor in selected_factors:
+                factor_info = factor_sig_df[factor_sig_df['Factor'] == factor].iloc[0]
+                st.write(f"• **{factor}**: β={factor_info['Beta']:.4f}, p={factor_info['p_value']:.4f}")
+    else:
+        st.warning("⚠️ No factors selected for Step 13 summary")
+    
+    st.info("💡 These selected factors will be used in Step 13 for the final key driver analysis and impact calculations.")
+
 
 # ──────────────────────────────────────────────────────────────
 if __name__ == "__main__":
